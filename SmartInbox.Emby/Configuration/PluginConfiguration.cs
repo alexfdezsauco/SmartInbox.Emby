@@ -8,5 +8,7 @@ namespace SmartInbox.Emby.Configuration
         public TimeSpan TimeToConsiderAMovieAsUnwatched { get; set; }
 
         public TimeSpan TimeToConsiderAMovieAsNew { get; set; }
+
+        // public Guid? TrainingId { get; set; }
     }
 }
