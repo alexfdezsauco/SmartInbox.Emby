@@ -34,6 +34,8 @@
 
         private readonly ILibraryMonitor _libraryMonitor;
 
+        private readonly IUserDataManager _dataManager;
+
         private readonly Plugin _plugin;
 
         private readonly IServerConfigurationManager configurationManager;
@@ -44,6 +46,8 @@
 
         private readonly IJsonSerializer _jsonSerializer;
 
+        private IUserManager _userManager;
+
         public BackupScheduledTask(
             ILibraryManager libraryManager,
             ILogger logger,
@@ -52,7 +56,7 @@
             IFileSystem fileSystem,
             IApplicationPaths appPaths,
             ILibraryMonitor libraryMonitor,
-            Plugin plugin
+            IUserManager userManager
             )
         {
             this._libraryManager = libraryManager;
@@ -62,7 +66,7 @@
             this._fileSystem = fileSystem;
             this._appPaths = appPaths;
             this._libraryMonitor = libraryMonitor;
-            this._plugin = plugin;
+            this._userManager = userManager;
         }
 
         public string Category => "Smart.Emby";
@@ -96,31 +100,33 @@
             var items = this._libraryManager.GetItemList(query, new[] { baseItem }).OfType<Video>().ToList();
 
             this._logger.Info("Updating table '{0}' ...", "Movies");
-            var genres = new List<string>();
+            var regex = new Regex("(\\s+|-)", RegexOptions.Compiled);
+            var genres = new SortedDictionary<string, string>();
             foreach (var currentItem in items)
             {
                 foreach (var genre in currentItem.Genres)
                 {
-                    if (!genres.Contains(genre))
+                    if (!genres.ContainsKey(genre))
                     {
-                        genres.Add(genre);
+                        var fieldName = "Is" + regex.Replace(genre, string.Empty);
+                        genres[genre] = fieldName;
                     }
                 }
             }
 
-            var regex = new Regex("\\s+", RegexOptions.Compiled);
             foreach (var genre in genres)
             {
-                var fieldName = "Is" + regex.Replace(genre, string.Empty);
+                var fieldName = genre.Value;
                 var liteCommand = sqLiteConnection.CreateCommand(
                     $@"ALTER TABLE [Movies]
-                            ADD [{fieldName}] BIT NOT NULL default 0");
+                    ADD [{fieldName}] BIT NOT NULL default 0");
                 try
                 {
                     liteCommand.ExecuteNonQuery();
                 }
-                catch (SQLiteException)
+                catch (SQLiteException e)
                 {
+                    _logger.ErrorException("Error altering [Movies] table", e);
                 }
             }
 
@@ -133,6 +139,8 @@
                     key = currentItemProviderId.Key + "=" + currentItemProviderId.Value + "|";
                 }
 
+                var user = this._userManager.Users[0];
+
                 if (!string.IsNullOrWhiteSpace(key))
                 {
                     key = key.TrimEnd('|');
@@ -143,11 +151,11 @@
 
                         genreColumns = genres.Aggregate(
                                 genreColumns,
-                                (current, genre) => current + "Is" + regex.Replace(genre, string.Empty) + ", ")
+                                (current, genre) => current + genre.Value + ", ")
                             .TrimEnd(',', ' ');
                         genreValues = genres.Aggregate(
                                 genreValues,
-                                (current, genre) => current + (currentItem.Genres.Contains(genre) ? "1" : "0") + ", ")
+                                (current, genre) => current + (currentItem.Genres.Contains(genre.Key) ? "1" : "0") + ", ")
                             .TrimEnd(',', ' ');
 
                         var updateCommandText =
@@ -157,7 +165,7 @@
                             key,
                             currentItem.Name,
                             currentItem.CommunityRating,
-                            currentItem.Played,
+                            currentItem.IsPlayed(user),
                             false,
                             currentItem.DateCreated.DateTime.ToString("yyyy-MM-dd HH:mm:ss"),
                             datedSynched.ToString("yyyy-MM-dd HH:mm:ss"));
@@ -171,17 +179,33 @@
             var updateDeletedCommand = sqLiteConnection.CreateCommand(@"UPDATE Movies SET IsDeleted = true WHERE DateSynched <> ?", datedSynched.ToString("yyyy-MM-dd HH:mm:ss"));
             updateDeletedCommand.ExecuteNonQuery();
 
-            var smartEmbyUrl = Environment.GetEnvironmentVariable("SMART_EMBY_ÚRL");
+            var smartEmbyUrl = Environment.GetEnvironmentVariable("SMART_EMBY_SERVER_URL");
             this._logger.Info("Uploading File in Smart Emby server '{0}'....", smartEmbyUrl);
             var form = new MultipartFormDataContent();
             var fileContent = new ByteArrayContent(File.ReadAllBytes(databaseFileName));
             fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse("multipart/form-data");
             form.Add(fileContent, "file", Path.GetFileName(databaseFileName));
             var httpClient = new HttpClient();
-            var response = await httpClient.PostAsync($"{smartEmbyUrl}/api/smartinbox/train", form);
-            
-            var trainingId = _jsonSerializer.DeserializeFromString<Guid>(await response.Content.ReadAsStringAsync());
+            var maxEpoch = Environment.GetEnvironmentVariable("SMART_EMBY_MAX_EPOCHS");
+            if (!int.TryParse(maxEpoch, out _))
+            {
+                maxEpoch = "500";
+            }
 
+            var maxEpochWithNoImprovement = Environment.GetEnvironmentVariable("SMART_EMBY_MAX_EPOCHS_WITH_NO_IMPROVEMENT");
+            if (!int.TryParse(maxEpochWithNoImprovement, out _))
+            {
+                maxEpochWithNoImprovement = "20";
+            }
+
+            var newMoviesCount = Environment.GetEnvironmentVariable("SMART_EMBY_NEW_MOVIES_COUNT");
+            if (!int.TryParse(newMoviesCount, out _))
+            {
+                newMoviesCount = "50";
+            }
+
+            var response = await httpClient.PostAsync($"{smartEmbyUrl}/api/smartinbox/train?maxEpochs={maxEpoch}&maxEpochsWithNoImprovement={maxEpochWithNoImprovement}&newMoviesCount={newMoviesCount}", form);
+            var trainingId = _jsonSerializer.DeserializeFromString<Guid>(await response.Content.ReadAsStringAsync());
 
             var streamWriter = new StreamWriter(File.OpenWrite("/config/plugins/SmartInbox.Emby.tid"));
             await streamWriter.WriteLineAsync(trainingId.ToString());

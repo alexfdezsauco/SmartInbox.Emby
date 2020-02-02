@@ -77,7 +77,7 @@ namespace SmartInbox.Emby.ScheduledTasks
         public async Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
         {
             this._logger.Info("Getting recommendations ....", null);
-            var smartEmbyUrl = Environment.GetEnvironmentVariable("SMART_EMBY_ÚRL");
+            var smartEmbyUrl = Environment.GetEnvironmentVariable("SMART_EMBY_SERVER_URL");
             var trainingIdFile = "/config/plugins/SmartInbox.Emby.tid";
 
             if (!File.Exists(trainingIdFile))
