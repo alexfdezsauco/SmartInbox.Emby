@@ -66,11 +66,11 @@ namespace SmartInbox.Emby.ScheduledTasks
             this._plugin = plugin;
         }
 
-        public string Category => "Smart.Emby";
+        public string Category => "SmartInbox.Emby";
 
         public string Description => "Get recommendations";
 
-        public string Key => "Get Recomendations";
+        public string Key => Keys.Recommendations;
 
         public string Name => "Get Recomendations";
 

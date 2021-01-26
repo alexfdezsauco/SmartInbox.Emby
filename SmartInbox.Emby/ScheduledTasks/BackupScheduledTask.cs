@@ -6,6 +6,7 @@
     using System.Linq;
     using System.Net.Http;
     using System.Net.Http.Headers;
+    using System.Reflection;
     using System.Text.RegularExpressions;
     using System.Threading;
     using System.Threading.Tasks;
@@ -13,6 +14,7 @@
     using MediaBrowser.Common.Configuration;
     using MediaBrowser.Controller.Configuration;
     using MediaBrowser.Controller.Entities;
+    using MediaBrowser.Controller.Entities.Movies;
     using MediaBrowser.Controller.Library;
     using MediaBrowser.Controller.MediaEncoding;
     using MediaBrowser.Model.Entities;
@@ -28,39 +30,38 @@
     {
         private readonly IApplicationPaths _appPaths;
 
+        private readonly IUserDataManager _dataManager;
+
         private readonly IFileSystem _fileSystem;
+
+        private readonly IJsonSerializer _jsonSerializer;
 
         private readonly ILibraryManager _libraryManager;
 
         private readonly ILibraryMonitor _libraryMonitor;
 
-        private readonly IUserDataManager _dataManager;
+        private readonly ILogger _logger;
+
+        private readonly IMediaEncoder _mediaEncoder;
 
         private readonly Plugin _plugin;
 
         private readonly IServerConfigurationManager configurationManager;
 
-        private readonly ILogger _logger;
-
-        private readonly IMediaEncoder _mediaEncoder;
-
-        private readonly IJsonSerializer _jsonSerializer;
-
-        private IUserManager _userManager;
+        private readonly IUserManager _userManager;
 
         public BackupScheduledTask(
             ILibraryManager libraryManager,
-            ILogger logger,
+            ILogManager logManager,
             IMediaEncoder mediaEncoder,
             IJsonSerializer jsonSerializer,
             IFileSystem fileSystem,
             IApplicationPaths appPaths,
             ILibraryMonitor libraryMonitor,
-            IUserManager userManager
-            )
+            IUserManager userManager)
         {
             this._libraryManager = libraryManager;
-            this._logger = logger;
+            this._logger = logManager.GetLogger(this.GetType().Name);
             this._mediaEncoder = mediaEncoder;
             this._jsonSerializer = jsonSerializer;
             this._fileSystem = fileSystem;
@@ -69,11 +70,11 @@
             this._userManager = userManager;
         }
 
-        public string Category => "Smart.Emby";
+        public string Category => "SmartInbox.Emby";
 
         public string Description => "Backup Data";
 
-        public string Key => "Backup Data";
+        public string Key => Keys.Backup;
 
         public string Name => "Backup Data";
 
@@ -94,10 +95,10 @@
                         )");
             sqLiteCommand.ExecuteNonQuery();
 
-            var baseItem = this._libraryManager.GetUserRootFolder().Children[1];
+            var baseItem = this._libraryManager.GetUserRootFolder().GetRecursiveChildren()[1];
             var query = new InternalItemsQuery { MediaTypes = new[] { MediaType.Video } };
 
-            var items = this._libraryManager.GetItemList(query, new[] { baseItem }).OfType<Video>().ToList();
+            var items = this._libraryManager.GetItemList(query, new[] { baseItem }).OfType<Movie>().ToList();
 
             this._logger.Info("Updating table '{0}' ...", "Movies");
             var regex = new Regex("(\\s+|-)", RegexOptions.Compiled);
@@ -106,10 +107,12 @@
             {
                 foreach (var genre in currentItem.Genres)
                 {
-                    if (!genres.ContainsKey(genre))
+                    var trimmedGenre = genre.Trim();
+                    var trimmedGenreLower = trimmedGenre.ToLowerInvariant();
+                    if (!genres.ContainsKey(trimmedGenreLower))
                     {
-                        var fieldName = "Is" + regex.Replace(genre, string.Empty);
-                        genres[genre] = fieldName;
+                        var fieldName = "Is" + regex.Replace(trimmedGenre, string.Empty);
+                        genres[trimmedGenreLower] = fieldName;
                     }
                 }
             }
@@ -126,37 +129,40 @@
                 }
                 catch (SQLiteException e)
                 {
-                    _logger.ErrorException("Error altering [Movies] table", e);
+                    this._logger.ErrorException("Error altering [Movies] table", e);
                 }
             }
 
             var datedSynched = DateTime.Now;
             foreach (var currentItem in items)
             {
-                string key = null;
-                foreach (var currentItemProviderId in currentItem.ProviderIds)
+                var key = string.Empty;
+                foreach (var currentItemProviderId in currentItem.ProviderIds.OrderBy(pair => pair.Key))
                 {
-                    key = currentItemProviderId.Key + "=" + currentItemProviderId.Value + "|";
+                    key += currentItemProviderId.Key + "=" + currentItemProviderId.Value + "|";
                 }
+
+                key = key.TrimEnd('|');
 
                 var user = this._userManager.Users[0];
 
                 if (!string.IsNullOrWhiteSpace(key))
                 {
-                    key = key.TrimEnd('|');
                     if (currentItem.CommunityRating != null)
                     {
                         var genreColumns = string.Empty;
                         var genreValues = string.Empty;
 
-                        genreColumns = genres.Aggregate(
-                                genreColumns,
-                                (current, genre) => current + genre.Value + ", ")
+                        genreColumns = genres.Aggregate(genreColumns, (current, genre) => current + genre.Value + ", ")
                             .TrimEnd(',', ' ');
                         genreValues = genres.Aggregate(
-                                genreValues,
-                                (current, genre) => current + (currentItem.Genres.Contains(genre.Key) ? "1" : "0") + ", ")
-                            .TrimEnd(',', ' ');
+                            genreValues,
+                            (current, genre) =>
+                                current + (Array.FindIndex(
+                                               currentItem.Genres,
+                                               g => g.Trim().ToLowerInvariant() == genre.Key) != -1
+                                               ? "1"
+                                               : "0") + ", ").TrimEnd(',', ' ');
 
                         var updateCommandText =
                             $"INSERT OR REPLACE INTO Movies(Id, Name, CommunityRating, IsPlayed, IsDeleted, DateCreated, DateSynched, {genreColumns}) Values(?, ?, ?, ?, ?, ?, ?, {genreValues})";
@@ -176,7 +182,9 @@
             }
 
             this._logger.Info("Synchronizing deleted items ...", null);
-            var updateDeletedCommand = sqLiteConnection.CreateCommand(@"UPDATE Movies SET IsDeleted = true WHERE DateSynched <> ?", datedSynched.ToString("yyyy-MM-dd HH:mm:ss"));
+            var updateDeletedCommand = sqLiteConnection.CreateCommand(
+                @"UPDATE Movies SET IsDeleted = true WHERE DateSynched <> ?",
+                datedSynched.ToString("yyyy-MM-dd HH:mm:ss"));
             updateDeletedCommand.ExecuteNonQuery();
 
             var smartEmbyUrl = Environment.GetEnvironmentVariable("SMART_EMBY_SERVER_URL");
@@ -192,7 +200,8 @@
                 maxEpoch = "500";
             }
 
-            var maxEpochWithNoImprovement = Environment.GetEnvironmentVariable("SMART_EMBY_MAX_EPOCHS_WITH_NO_IMPROVEMENT");
+            var maxEpochWithNoImprovement =
+                Environment.GetEnvironmentVariable("SMART_EMBY_MAX_EPOCHS_WITH_NO_IMPROVEMENT");
             if (!int.TryParse(maxEpochWithNoImprovement, out _))
             {
                 maxEpochWithNoImprovement = "20";
@@ -204,8 +213,11 @@
                 newMoviesCount = "50";
             }
 
-            var response = await httpClient.PostAsync($"{smartEmbyUrl}/api/smartinbox/train?maxEpochs={maxEpoch}&maxEpochsWithNoImprovement={maxEpochWithNoImprovement}&newMoviesCount={newMoviesCount}", form);
-            var trainingId = _jsonSerializer.DeserializeFromString<Guid>(await response.Content.ReadAsStringAsync());
+            var response = await httpClient.PostAsync(
+                               $"{smartEmbyUrl}/api/smartinbox/train?maxEpochs={maxEpoch}&maxEpochsWithNoImprovement={maxEpochWithNoImprovement}&newMoviesCount={newMoviesCount}",
+                               form);
+            var trainingId =
+                this._jsonSerializer.DeserializeFromString<Guid>(await response.Content.ReadAsStringAsync());
 
             var streamWriter = new StreamWriter(File.OpenWrite("/config/plugins/SmartInbox.Emby.tid"));
             await streamWriter.WriteLineAsync(trainingId.ToString());
