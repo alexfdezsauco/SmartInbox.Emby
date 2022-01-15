@@ -2,11 +2,11 @@
 {
     using System;
     using System.Collections.Generic;
+    using System.Globalization;
     using System.IO;
     using System.Linq;
     using System.Net.Http;
     using System.Net.Http.Headers;
-    using System.Reflection;
     using System.Text.RegularExpressions;
     using System.Threading;
     using System.Threading.Tasks;
@@ -20,13 +20,14 @@
     using MediaBrowser.Model.Entities;
     using MediaBrowser.Model.IO;
     using MediaBrowser.Model.Logging;
+    using MediaBrowser.Model.Querying;
     using MediaBrowser.Model.Serialization;
     using MediaBrowser.Model.Tasks;
 
     using SQLite.Net;
     using SQLite.Net.Platform.Generic;
 
-    public class BackupScheduledTask : IScheduledTask
+    public class TrainModelScheduledTask : IScheduledTask
     {
         private readonly IApplicationPaths _appPaths;
 
@@ -46,19 +47,13 @@
 
         private readonly Plugin _plugin;
 
-        private readonly IServerConfigurationManager configurationManager;
-
         private readonly IUserManager _userManager;
 
-        public BackupScheduledTask(
-            ILibraryManager libraryManager,
-            ILogManager logManager,
-            IMediaEncoder mediaEncoder,
-            IJsonSerializer jsonSerializer,
-            IFileSystem fileSystem,
-            IApplicationPaths appPaths,
-            ILibraryMonitor libraryMonitor,
-            IUserManager userManager)
+        private readonly IServerConfigurationManager configurationManager;
+
+        public TrainModelScheduledTask(
+            ILibraryManager libraryManager, ILogManager logManager, IMediaEncoder mediaEncoder, IJsonSerializer jsonSerializer,
+            IFileSystem fileSystem, IApplicationPaths appPaths, ILibraryMonitor libraryMonitor, IUserManager userManager)
         {
             this._libraryManager = libraryManager;
             this._logger = logManager.GetLogger(this.GetType().Name);
@@ -70,13 +65,13 @@
             this._userManager = userManager;
         }
 
-        public string Category => "SmartInbox.Emby";
+        public string Category => "Smart Inbox";
 
-        public string Description => "Backup Data";
+        public string Description => "Create data set & train a model based on user playback action";
 
         public string Key => Keys.Backup;
 
-        public string Name => "Backup Data";
+        public string Name => "Model Training";
 
         public async Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
         {
@@ -95,10 +90,29 @@
                         )");
             sqLiteCommand.ExecuteNonQuery();
 
-            var baseItem = this._libraryManager.GetUserRootFolder().GetRecursiveChildren()[1];
-            var query = new InternalItemsQuery { MediaTypes = new[] { MediaType.Video } };
+            var recursiveChildren = this._libraryManager.RootFolder.GetRecursiveChildren();
+            if (recursiveChildren.Length == 0)
+            {
+                this._logger.Warn("UserRootFolder has no recursive children");
 
-            var items = this._libraryManager.GetItemList(query, new[] { baseItem }).OfType<Movie>().ToList();
+                return;
+            }
+
+            var baseItem = recursiveChildren[1];
+            var query = new InternalItemsQuery
+                            {
+                                MediaTypes = new[]
+                                                 {
+                                                     MediaType.Video,
+                                                 },
+                            };
+
+            var items = this._libraryManager.GetItemList(
+                query,
+                new[]
+                    {
+                        baseItem,
+                    }).OfType<Movie>().ToList();
 
             this._logger.Info("Updating table '{0}' ...", "Movies");
             var regex = new Regex("(\\s+|-)", RegexOptions.Compiled);
@@ -144,7 +158,11 @@
 
                 key = key.TrimEnd('|');
 
-                var user = this._userManager.Users[0];
+                var user = this._userManager.GetUserList(
+                    new UserQuery
+                        {
+                            IsDisabled = false,
+                        }).FirstOrDefault();
 
                 if (!string.IsNullOrWhiteSpace(key))
                 {
@@ -158,14 +176,19 @@
                         genreValues = genres.Aggregate(
                             genreValues,
                             (current, genre) =>
-                                current + (Array.FindIndex(
-                                               currentItem.Genres,
-                                               g => g.Trim().ToLowerInvariant() == genre.Key) != -1
+                                current + (Array.FindIndex(currentItem.Genres, g => g.Trim().ToLowerInvariant() == genre.Key) != -1
                                                ? "1"
                                                : "0") + ", ").TrimEnd(',', ' ');
 
+                        var dateCreated = currentItem.DateCreated.DateTime;
+                        if (currentItem.DateCreated < currentItem.DateModified)
+                        {
+                            dateCreated = currentItem.DateModified.DateTime;
+                        }
+
                         var updateCommandText =
                             $"INSERT OR REPLACE INTO Movies(Id, Name, CommunityRating, IsPlayed, IsDeleted, DateCreated, DateSynched, {genreColumns}) Values(?, ?, ?, ?, ?, ?, ?, {genreValues})";
+
                         var updateCommand = sqLiteConnection.CreateCommand(
                             updateCommandText,
                             key,
@@ -173,7 +196,7 @@
                             currentItem.CommunityRating,
                             currentItem.IsPlayed(user),
                             false,
-                            currentItem.DateCreated.DateTime.ToString("yyyy-MM-dd HH:mm:ss"),
+                            dateCreated.ToString("yyyy-MM-dd HH:mm:ss"),
                             datedSynched.ToString("yyyy-MM-dd HH:mm:ss"));
 
                         updateCommand.ExecuteNonQuery();
@@ -200,8 +223,7 @@
                 maxEpoch = "500";
             }
 
-            var maxEpochWithNoImprovement =
-                Environment.GetEnvironmentVariable("SMART_EMBY_MAX_EPOCHS_WITH_NO_IMPROVEMENT");
+            var maxEpochWithNoImprovement = Environment.GetEnvironmentVariable("SMART_EMBY_MAX_EPOCHS_WITH_NO_IMPROVEMENT");
             if (!int.TryParse(maxEpochWithNoImprovement, out _))
             {
                 maxEpochWithNoImprovement = "20";
@@ -212,16 +234,20 @@
             {
                 newMoviesCount = "50";
             }
+            
+            var oldMoviesToTreatAsNew = Environment.GetEnvironmentVariable("SMART_EMBY_OLD_MOVIES_TO_TREAT_AS_NEW");
+            if (!int.TryParse(oldMoviesToTreatAsNew, out var oldMoviesToTreatAsNewInt))
+            {
+                oldMoviesToTreatAsNew = Math.Truncate(oldMoviesToTreatAsNewInt * 0.10f).ToString(CultureInfo.InvariantCulture);
+            }
 
-            var response = await httpClient.PostAsync(
-                               $"{smartEmbyUrl}/api/smartinbox/train?maxEpochs={maxEpoch}&maxEpochsWithNoImprovement={maxEpochWithNoImprovement}&newMoviesCount={newMoviesCount}",
-                               form);
-            var trainingId =
-                this._jsonSerializer.DeserializeFromString<Guid>(await response.Content.ReadAsStringAsync());
+            var uri = $"{smartEmbyUrl}/api/smartinbox/train?maxEpochs={maxEpoch}&maxEpochsWithNoImprovement={maxEpochWithNoImprovement}&newMoviesCount={newMoviesCount}&oldMoviesToTreatAsNew={oldMoviesToTreatAsNew}";
+            var response = await httpClient.PostAsync(uri, form, cancellationToken);
+            var trainingId = this._jsonSerializer.DeserializeFromString<Guid>(await response.Content.ReadAsStringAsync());
 
             var streamWriter = new StreamWriter(File.OpenWrite("/config/plugins/SmartInbox.Emby.tid"));
             await streamWriter.WriteLineAsync(trainingId.ToString());
-            streamWriter.Flush();
+            await streamWriter.FlushAsync();
             streamWriter.Close();
 
             this._logger.Info("Saved Training Id '{trainingId}'", trainingId);
@@ -235,8 +261,8 @@
                                {
                                    Type = TaskTriggerInfo.TriggerDaily,
                                    TimeOfDayTicks = TimeSpan.FromHours(5).Ticks,
-                                   MaxRuntimeTicks = TimeSpan.FromHours(3).Ticks
-                               }
+                                   MaxRuntimeTicks = TimeSpan.FromHours(3).Ticks,
+                               },
                        };
         }
     }

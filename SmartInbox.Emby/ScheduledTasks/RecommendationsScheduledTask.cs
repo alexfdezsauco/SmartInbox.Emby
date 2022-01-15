@@ -66,9 +66,9 @@ namespace SmartInbox.Emby.ScheduledTasks
             this._plugin = plugin;
         }
 
-        public string Category => "SmartInbox.Emby";
+        public string Category => "Smart Inbox";
 
-        public string Description => "Get recommendations";
+        public string Description => "Get recommended movies based on the user playback actions";
 
         public string Key => Keys.Recommendations;
 

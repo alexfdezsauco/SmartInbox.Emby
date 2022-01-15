@@ -15,15 +15,15 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Costura.Fody" Version="5.0.0-alpha0411">
+    <PackageReference Include="Costura.Fody" Version="5.7.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Fody" Version="6.3.0">
+    <PackageReference Include="Fody" Version="6.6.0">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="MediaBrowser.Server.Core" Version="4.5.0.28" />
+    <PackageReference Include="MediaBrowser.Server.Core" Version="4.7.0.19-beta" />
     <PackageReference Include="SQLite.Net.Standard" Version="1.0.0" />
     <PackageReference Include="System.Memory" Version="4.5.4" />
   </ItemGroup>

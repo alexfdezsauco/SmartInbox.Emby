@@ -1,4 +1,4 @@
-﻿namespace TVHeadEnd
+﻿namespace SmartInbox.Emby
 {
     using System;
     using System.Collections.Generic;
@@ -40,9 +40,6 @@
             this._taskManager = taskManager;
             this._logger = logManager.GetLogger(this.GetType().Name);
 
-            // var interval = TimeSpan.FromMinutes(2);
-            // this._updateTimer = new Timer(this.OnUpdateTimerCallback, null, interval, interval);
-
             this._taskManager.TaskCompleted += this.OnTaskManagerTaskCompleted;
         }
 
@@ -83,7 +80,7 @@
 
         public async Task<DynamicImageResponse> GetChannelImage(ImageType type, CancellationToken cancellationToken)
         {
-            return new DynamicImageResponse { HasImage = false };
+            return new DynamicImageResponse();
         }
 
         public async Task<ChannelItemResult> GetChannelItems(
@@ -99,7 +96,7 @@
                 var databaseFileName = "/config/data/smart-inbox-recommendations.db";
                 if (File.Exists(databaseFileName))
                 {
-                    var baseItem = this._libraryManager.GetUserRootFolder().GetRecursiveChildren()[1];
+                    var baseItem = this._libraryManager.RootFolder.GetRecursiveChildren()[1];
                     var internalItemsQuery = new InternalItemsQuery { MediaTypes = new[] { MediaType.Video } };
 
                     var moviesEnumeration = this._libraryManager.GetItemList(internalItemsQuery, new[] { baseItem }).OfType<Movie>();
@@ -148,6 +145,7 @@
                                                           ContentType = ChannelMediaContentType.Movie,
                                                           MediaType = ChannelMediaType.Video,
                                                           Name = currentItem.Name,
+                                                          CommunityRating = currentItem.CommunityRating,
                                                           ImageUrl = currentItem.PrimaryImagePath,
                                                           OriginalTitle = currentItem.OriginalTitle
                                                       };
