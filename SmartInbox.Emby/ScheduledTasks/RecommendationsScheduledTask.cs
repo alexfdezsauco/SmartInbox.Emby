@@ -94,7 +94,7 @@ namespace SmartInbox.Emby.ScheduledTasks
 
             var httpClient = new HttpClient();
             var response = await httpClient.GetAsync($"{smartEmbyUrl}/api/smartinbox/recommendations?id=" + trainingId);
-            var recommendations =  this._jsonSerializer.DeserializeFromString<List<Recommendation>>(await response.Content.ReadAsStringAsync());
+            var recommendations = this._jsonSerializer.DeserializeFromString<List<Recommendation>>(await response.Content.ReadAsStringAsync());
 
             var databaseFileName = "/config/data/smart-inbox-recommendations.db";
             var sqLiteConnection = new SQLiteConnection(new SQLitePlatformGeneric(), databaseFileName);

@@ -78,7 +78,7 @@
             var databaseFileName = "/config/data/smart-inbox.db";
             this._logger.Info("Creating Database '{0}'...", databaseFileName);
             var sqLiteConnection = new SQLiteConnection(new SQLitePlatformGeneric(), databaseFileName);
-            var sqLiteCommand = sqLiteConnection.CreateCommand(
+            var createTableCommand = sqLiteConnection.CreateCommand(
                 @"CREATE TABLE IF NOT EXISTS [Movies] (
                             [Id] TEXT NOT NULL PRIMARY KEY,
                             [Name] TEXT NOT NULL,
@@ -88,7 +88,17 @@
                             [DateCreated] DATE NOT NULL,
                             [DateSynched] DATE NOT NULL
                         )");
-            sqLiteCommand.ExecuteNonQuery();
+            createTableCommand.ExecuteNonQuery();
+
+            try
+            {
+                var createIndexCommand = sqLiteConnection.CreateCommand("CREATE INDEX \"Id_Idx\" ON \"Movies\" (\"Id\" ASC)");
+                createIndexCommand.ExecuteNonQuery();
+            }
+            catch (Exception e)
+            {
+                this._logger.Warn("Error creating index: {0}", e.Message);
+            }
 
             var recursiveChildren = this._libraryManager.RootFolder.GetRecursiveChildren();
             if (recursiveChildren.Length == 0)
@@ -114,7 +124,7 @@
                         baseItem,
                     }).OfType<Movie>().ToList();
 
-            this._logger.Info("Updating table '{0}' ...", "Movies");
+            this._logger.Info("Computing genres...");
             var regex = new Regex("(\\s+|-)", RegexOptions.Compiled);
             var genres = new SortedDictionary<string, string>();
             foreach (var currentItem in items)
@@ -131,25 +141,50 @@
                 }
             }
 
+            this._logger.Info("Computed genres");
+
+            var schemaQueryCommand = sqLiteConnection.CreateCommand("SELECT * FROM [Movies] LIMIT 1");
+            var commandResult = schemaQueryCommand.ExecuteDeferredQuery();
+            var columnNames = commandResult.ColumnNames.ToList();
+
+            this._logger.Info("Updating table '{0}' schema ...", "Movies");
+
             foreach (var genre in genres)
             {
                 var fieldName = genre.Value;
-                var liteCommand = sqLiteConnection.CreateCommand(
-                    $@"ALTER TABLE [Movies]
+                if (!columnNames.Contains(fieldName, StringComparer.InvariantCultureIgnoreCase))
+                {
+                    var alterTableCommand = sqLiteConnection.CreateCommand(
+                        $@"ALTER TABLE [Movies]
                     ADD [{fieldName}] BIT NOT NULL default 0");
-                try
-                {
-                    liteCommand.ExecuteNonQuery();
-                }
-                catch (SQLiteException e)
-                {
-                    this._logger.ErrorException("Error altering [Movies] table", e);
+                    try
+                    {
+                        alterTableCommand.ExecuteNonQuery();
+                    }
+                    catch (SQLiteException e)
+                    {
+                        this._logger.ErrorException("Error altering [Movies] table", e);
+                    }
                 }
             }
 
+            this._logger.Info("Updated table '{0}' schema", "Movies");
+
+            var user = this._userManager.GetUserList(
+                new UserQuery
+                    {
+                        IsDisabled = false,
+                    }).FirstOrDefault();
+
+
+            this._logger.Info("Updating table '{0}'...", "Movies");
+
             var datedSynched = DateTime.Now;
-            foreach (var currentItem in items)
+            for (var index = 0; index < items.Count; index++)
             {
+                progress.Report(index * 100.0d / (2 * items.Count));
+
+                var currentItem = items[index];
                 var key = string.Empty;
                 foreach (var currentItemProviderId in currentItem.ProviderIds.OrderBy(pair => pair.Key))
                 {
@@ -157,12 +192,6 @@
                 }
 
                 key = key.TrimEnd('|');
-
-                var user = this._userManager.GetUserList(
-                    new UserQuery
-                        {
-                            IsDisabled = false,
-                        }).FirstOrDefault();
 
                 if (!string.IsNullOrWhiteSpace(key))
                 {
@@ -176,7 +205,9 @@
                         genreValues = genres.Aggregate(
                             genreValues,
                             (current, genre) =>
-                                current + (Array.FindIndex(currentItem.Genres, g => g.Trim().ToLowerInvariant() == genre.Key) != -1
+                                current + (Array.FindIndex(
+                                               currentItem.Genres,
+                                               g => g.Trim().ToLowerInvariant() == genre.Key) != -1
                                                ? "1"
                                                : "0") + ", ").TrimEnd(',', ' ');
 
@@ -251,6 +282,22 @@
             streamWriter.Close();
 
             this._logger.Info("Saved Training Id '{trainingId}'", trainingId);
+
+            progress.Report(75);
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    var recommendationsResponse = await httpClient.GetAsync($"{smartEmbyUrl}/api/smartinbox/recommendations?id=" + trainingId, cancellationToken);
+                    recommendationsResponse.EnsureSuccessStatusCode();
+                    progress.Report(100);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    this._logger.Warn("Recommendations for training '{trainingId}' are not available yet.", ex.Message);
+                }
+            }
         }
 
         public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
