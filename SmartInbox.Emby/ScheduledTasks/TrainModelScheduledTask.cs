@@ -179,6 +179,9 @@
 
             this._logger.Info("Updating table '{0}'...", "Movies");
 
+            var beginCommand = sqLiteConnection.CreateCommand("BEGIN");
+            beginCommand.ExecuteNonQuery();
+
             var datedSynched = DateTime.Now;
             for (var index = 0; index < items.Count; index++)
             {
@@ -234,6 +237,10 @@
                     }
                 }
             }
+
+            var endCommand = sqLiteConnection.CreateCommand("END");
+            endCommand.ExecuteNonQuery();
+
 
             this._logger.Info("Synchronizing deleted items ...", null);
             var updateDeletedCommand = sqLiteConnection.CreateCommand(
